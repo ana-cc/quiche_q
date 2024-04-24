@@ -36,6 +36,7 @@ use crate::recovery;
 use crate::recovery::Acked;
 use crate::recovery::CongestionControlOps;
 use crate::recovery::Recovery;
+use crate::recovery::resume::CrState;
 use crate::recovery::Sent;
 
 pub static RENO: CongestionControlOps = CongestionControlOps {
@@ -78,7 +79,13 @@ fn on_packet_acked(r: &mut Recovery, packet: &Acked, now: Instant) {
         if r.hystart.in_css() {
             r.congestion_window += r.hystart.css_cwnd_inc(r.max_datagram_size);
         } else {
-            r.congestion_window += r.max_datagram_size;
+            let cr_state = r.resume.get_state();
+            match cr_state {
+                CrState::Unvalidated(_) => {}
+                _ => {
+                    r.congestion_window += r.max_datagram_size;
+                }
+            }
         }
 
         if r.hystart
