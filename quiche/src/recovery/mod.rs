@@ -1080,9 +1080,11 @@ impl Recovery {
             .generate_rate_sample(self.rtt_stats.min_rtt);
 
         // Call congestion control hooks.
-        (self.cc_ops.on_packets_acked)(self, acked, now);
+
+        (self.cc_ops.on_packets_acked)(self, acked, epoch, now);
 
         self.bytes_in_flight -= newly_acked_bytes;
+
     }
 
     fn in_congestion_recovery(&self, sent_time: Instant) -> bool {
@@ -1128,7 +1130,7 @@ impl Recovery {
             let largest_sent_pkt = self.epochs[epoch].sent_packets.iter().map(|p| p.pkt_num).max().unwrap_or_default();
             let new_cwnd = self.resume.congestion_event(largest_sent_pkt);
             if new_cwnd != 0 {
-                self.congestion_window = cmp::max(new_cwnd, self.initial_window);
+                self.congestion_window = cmp::max(new_cwnd, self.max_datagram_size * MINIMUM_WINDOW_PACKETS);
             }
         }
     }
