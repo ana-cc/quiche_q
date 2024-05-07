@@ -490,9 +490,12 @@ impl Recovery {
 
             if self.resume.enabled() && epoch == packet::Epoch::Application {
                 let largest_sent_pkt = self.epochs[epoch].sent_packets.iter().map(|p| p.pkt_num).max().unwrap_or_default();
+
+                let bytes_acked = self.resume.total_acked;
+                let iw_acked = bytes_acked >= self.initial_window;
                 // Increase the congestion window by a jump determined by careful resume
                 self.congestion_window += self.resume.send_packet(
-                    self.rtt_stats.smoothed_rtt, self.congestion_window, largest_sent_pkt, self.app_limited
+                    self.rtt_stats.smoothed_rtt, self.congestion_window, largest_sent_pkt, self.app_limited, iw_acked
                 );
             }
 
