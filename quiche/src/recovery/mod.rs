@@ -1084,7 +1084,6 @@ impl Recovery {
         (self.cc_ops.on_packets_acked)(self, acked, epoch, now);
 
         self.bytes_in_flight -= newly_acked_bytes;
-
     }
 
     fn in_congestion_recovery(&self, sent_time: Instant) -> bool {
