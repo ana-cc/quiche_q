@@ -143,7 +143,6 @@ pub struct StreamMap {
     /// generate a `StreamIter` of streams without having to iterate over the
     /// full list of streams.
     almost_full: StreamIdHashSet,
-    force_update: StreamIdHashSet,
 
     /// Set of stream IDs corresponding to streams that are blocked. The value
     /// of the map elements represents the offset of the stream at which the
@@ -203,10 +202,9 @@ impl StreamMap {
     /// This also takes care of enforcing both local and the peer's stream
     /// count limits. If one of these limits is violated, the `StreamLimit`
     /// error is returned.
-    pub(crate) fn get_or_create<W: Into<Option<u64>>>(
+    pub(crate) fn get_or_create(
         &mut self, id: u64, local_params: &crate::TransportParams,
         peer_params: &crate::TransportParams, local: bool, is_server: bool,
-        window: W,
     ) -> Result<&mut Stream> {
         let (stream, is_new_and_writable) = match self.streams.entry(id) {
             hash_map::Entry::Vacant(v) => {
@@ -307,7 +305,6 @@ impl StreamMap {
                     is_bidi(id),
                     local,
                     self.max_stream_window,
-                    window,
                 );
 
                 let is_writable = s.is_writable();
@@ -436,13 +433,6 @@ impl StreamMap {
     /// Removes the stream ID from the almost full streams set.
     pub fn remove_almost_full(&mut self, stream_id: u64) {
         self.almost_full.remove(&stream_id);
-    }
-
-    pub fn insert_force_update(&mut self, stream_id: u64) {
-        self.force_update.insert(stream_id);
-    }
-    pub fn remove_force_update(&mut self, stream_id: u64) {
-        self.force_update.remove(&stream_id);
     }
 
     /// Adds the stream ID to the blocked streams set with the
@@ -581,9 +571,6 @@ impl StreamMap {
     pub fn almost_full(&self) -> StreamIter {
         StreamIter::from(&self.almost_full)
     }
-    pub fn force_update(&self) -> StreamIter {
-        StreamIter::from(&self.force_update)
-    }
 
     /// Creates an iterator over streams that need to send STREAM_DATA_BLOCKED.
     pub fn blocked(&self) -> hash_map::Iter<u64, u64> {
@@ -686,9 +673,9 @@ pub struct Stream {
 
 impl Stream {
     /// Creates a new stream with the given flow control limits.
-    pub fn new<W: Into<Option<u64>>>(
+    pub fn new(
         id: u64, max_rx_data: u64, max_tx_data: u64, bidi: bool, local: bool,
-        max_window: u64, window: W
+        max_window: u64,
     ) -> Stream {
         let priority_key = Arc::new(StreamPriorityKey {
             id,
@@ -696,7 +683,7 @@ impl Stream {
         });
 
         Stream {
-            recv: recv_buf::RecvBuf::new(max_rx_data, max_window, window),
+            recv: recv_buf::RecvBuf::new(max_rx_data, max_window),
             send: send_buf::SendBuf::new(max_tx_data),
             send_lowat: 1,
             bidi,
@@ -1047,7 +1034,7 @@ mod tests {
 
     #[test]
     fn recv_flow_control() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let mut buf = [0; 32];
@@ -1078,7 +1065,7 @@ mod tests {
 
     #[test]
     fn recv_past_fin() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1090,7 +1077,7 @@ mod tests {
 
     #[test]
     fn recv_fin_dup() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1108,7 +1095,7 @@ mod tests {
 
     #[test]
     fn recv_fin_change() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1120,7 +1107,7 @@ mod tests {
 
     #[test]
     fn recv_fin_lower_than_received() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1132,7 +1119,7 @@ mod tests {
 
     #[test]
     fn recv_fin_flow_control() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let mut buf = [0; 32];
@@ -1152,7 +1139,7 @@ mod tests {
 
     #[test]
     fn recv_fin_reset_mismatch() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, true);
@@ -1163,7 +1150,7 @@ mod tests {
 
     #[test]
     fn recv_reset_dup() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1175,7 +1162,7 @@ mod tests {
 
     #[test]
     fn recv_reset_change() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1187,7 +1174,7 @@ mod tests {
 
     #[test]
     fn recv_reset_lower_than_received() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -1200,7 +1187,7 @@ mod tests {
     fn send_flow_control() {
         let mut buf = [0; 25];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         let first = b"hello";
         let second = b"world";
@@ -1243,7 +1230,7 @@ mod tests {
 
     #[test]
     fn send_past_fin() {
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         let first = b"hello";
         let second = b"world";
@@ -1259,7 +1246,7 @@ mod tests {
 
     #[test]
     fn send_fin_dup() {
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", true), Ok(5));
         assert!(stream.send.is_fin());
@@ -1270,7 +1257,7 @@ mod tests {
 
     #[test]
     fn send_undo_fin() {
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", true), Ok(5));
         assert!(stream.send.is_fin());
@@ -1285,7 +1272,7 @@ mod tests {
     fn send_fin_max_data_match() {
         let mut buf = [0; 15];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDO);
 
         let slice = b"hellohellohello";
 
@@ -1301,7 +1288,7 @@ mod tests {
     fn send_fin_zero_length() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"", true), Ok(0));
@@ -1317,7 +1304,7 @@ mod tests {
     fn send_ack() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1347,7 +1334,7 @@ mod tests {
     fn send_ack_reordering() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1384,7 +1371,7 @@ mod tests {
 
     #[test]
     fn recv_data_below_off() {
-        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 15, 0, true, true, DEFAULT_STREAM_WINDOW);
 
         let first = RangeBuf::from(b"hello", 0, false);
 
@@ -1407,7 +1394,7 @@ mod tests {
     #[test]
     fn stream_complete() {
         let mut stream =
-            Stream::new(0, 30, 30, true, true, DEFAULT_STREAM_WINDOW, None);
+            Stream::new(0, 30, 30, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1450,7 +1437,7 @@ mod tests {
     fn send_fin_zero_length_output() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 15, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.off_front(), 0);
@@ -1480,7 +1467,7 @@ mod tests {
     fn send_emit() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1532,7 +1519,7 @@ mod tests {
     fn send_emit_ack() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
@@ -1599,7 +1586,7 @@ mod tests {
     fn send_emit_retransmit() {
         let mut buf = [0; 5];
 
-        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW, None);
+        let mut stream = Stream::new(0, 0, 20, true, true, DEFAULT_STREAM_WINDOW);
 
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
