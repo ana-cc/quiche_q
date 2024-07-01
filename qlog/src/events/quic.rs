@@ -573,7 +573,6 @@ pub struct TransportParametersSet {
 
     pub preferred_address: Option<PreferredAddress>,
 
-    pub bdp_tokens: Option<bool>,
 }
 
 #[serde_with::skip_serializing_none]

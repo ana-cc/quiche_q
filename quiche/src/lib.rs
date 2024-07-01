@@ -1351,12 +1351,7 @@ impl Config {
         self.disable_dcid_reuse = v;
     }
 
-    /// Configures advertising that the server is sending BDP tokens in its NEW_TOKEN frames
-    ///
-    /// The default value is `false`.
-    pub fn set_bdp_tokens(&mut self, v: bool) {
-        self.local_transport_params.bdp_tokens = v;
-    }
+
 }
 
 /// A QUIC connection.
@@ -1463,17 +1458,8 @@ pub struct Connection {
     /// retry to validate the server's transport parameter.
     rscid: Option<ConnectionId<'static>>,
 
-    /// Address verification token to send in the INITIAL packet
+    /// Received address verification token.
     token: Option<Vec<u8>>,
-
-    /// Address verification token to send in next packet in a NEW_TOKEN frame
-    new_token: Option<Vec<u8>>,
-
-    /// Received address verification token from the INITIAL packet.
-    peer_token: Option<Vec<u8>>,
-
-    /// Queue of tokens received in NEW_TOKEN frames
-    received_tokens: VecDeque<Vec<u8>>,
 
     /// Error code and reason to be sent to the peer in a CONNECTION_CLOSE
     /// frame.
@@ -1582,7 +1568,6 @@ pub struct Connection {
 
     cr_event: Option<recovery::CREvent>,
 
-    default_stream_window: Option<u64>
 }
 
 /// Creates a new server-side connection.
@@ -1964,9 +1949,6 @@ impl Connection {
             rscid: None,
 
             token: None,
-            new_token: None,
-            peer_token: None,
-            received_tokens: VecDeque::new(),
 
             local_error: None,
 
@@ -2040,7 +2022,6 @@ impl Connection {
 
             cr_event: None,
 
-            default_stream_window: None,
         };
 
         if let Some(odcid) = odcid {
@@ -2229,36 +2210,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Configures the token for the Initial packet
-    ///
-    /// This must only be called immediately after creating a connection; that
-    /// is, before any packet is sent or received.
-    #[inline]
-    pub fn set_token(&mut self, token: &[u8]) {
-        self.token.replace(token.to_vec());
-    }
-
-    /// Sends an address validation token in a NEW_TOKEN frame
-    #[inline]
-    pub fn send_new_token(&mut self, token: &[u8]) {
-        if self.is_closed() || self.is_draining() {
-            return;
-        }
-        self.new_token.replace(token.to_vec());
-    }
-
-    /// The token received from the peer in the INITIAL packet
-    #[inline]
-    pub fn peer_token(&self) -> Option<&[u8]> {
-        self.peer_token.as_deref()
-    }
-
-    /// Fetch the next received token in the queue
-    #[inline]
-    pub fn recv_new_token(&mut self) -> Option<Vec<u8>> {
-        self.received_tokens.pop_front()
-    }
-
     /// Configures careful resume on the active path with stored CC parameters.
     /// Careful resume will not be enabled until this function is called, even if [`enable_resume()`] is called.
     ///
@@ -2266,19 +2217,6 @@ impl Connection {
     pub fn setup_careful_resume(&mut self, previous_rtt: Duration, previous_cwnd: usize) -> Result<()> {
         self.paths.get_active_mut()?.recovery
             .setup_careful_resume(previous_rtt, previous_cwnd);
-        Ok(())
-    }
-
-    /// Sets the default window for jumps in stream flow credits
-    pub fn setup_default_stream_window(&mut self, window: u64) {
-        self.default_stream_window = Some(window);
-    }
-
-    /// Sets the initial RTT heuristic on the active path, if the application has information about
-    /// what the RTT of the path is likely to be.
-    pub fn set_initial_rtt(&mut self, initial_rtt: Duration) -> Result<()> {
-        self.paths.get_active_mut()?.recovery
-            .set_initial_rtt(initial_rtt);
         Ok(())
     }
 
@@ -2776,14 +2714,6 @@ impl Connection {
             pn,
             AddrTupleFmt(info.from, info.to)
         );
-
-        if hdr.ty == Type::Initial {
-            if let Some(token) = &hdr.token {
-                if token.len() != 0 {
-                    self.peer_token.replace(token.clone());
-                }
-            }
-        }
 
         #[cfg(feature = "qlog")]
         let mut qlog_frames = vec![];
@@ -3549,7 +3479,6 @@ impl Connection {
             }
         }
 
-        self.update_tx_cap();
 
         if done == 0 {
             self.last_tx_data = self.tx_data;
@@ -4126,29 +4055,6 @@ impl Connection {
                 }
             }
 
-            for stream_id in self.streams.force_update() {
-                let stream = match self.streams.get_mut(stream_id) {
-                    Some(v) => v,
-                    None => {
-                        self.streams.remove_force_update(stream_id);
-                        continue;
-                    },
-                };
-
-                let frame = frame::Frame::MaxStreamData {
-                    stream_id,
-                    max: stream.recv.max_data()
-                };
-
-                if push_frame_to_pkt!(b, frames, frame, left) {
-                    self.streams.remove_force_update(stream_id);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-
-                    self.almost_full = true;
-                }
-            }
 
             // Create MAX_DATA frame as needed.
             if self.almost_full &&
@@ -4253,17 +4159,6 @@ impl Connection {
                 }
             }
 
-            // Create NEW_TOKEN frame.
-            if let Some(token) = &self.new_token {
-                let frame = frame::Frame::NewToken { token: token.clone() };
-
-                if push_frame_to_pkt!(b, frames, frame, left) {
-                    self.new_token = None;
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
         }
 
         // Create CONNECTION_CLOSE frame. Try to send this only on the active
@@ -5208,23 +5103,6 @@ impl Connection {
 
         self.streams
             .update_priority(&old_priority_key, &new_priority_key);
-
-        Ok(())
-    }
-
-    /// Sets the data flow credit limit for a stream. This will not reduce a flow credit to lower
-    /// than it already is. Causes a `MAX_STREAM_DATA` frame to be sent.
-    pub fn stream_max_data(
-        &mut self, stream_id: u64, max_data: u64
-    ) -> Result<()> {
-        let stream = match self.get_or_create_stream(stream_id, true) {
-            Ok(v) => v,
-            Err(Error::Done) => return Ok(()),
-            Err(e) => return Err(e),
-        };
-
-        stream.recv.set_max_data(max_data, time::Instant::now());
-        self.streams.insert_force_update(stream_id);
 
         Ok(())
     }
@@ -7108,7 +6986,6 @@ impl Connection {
             &self.peer_transport_params,
             local,
             self.is_server,
-            self.default_stream_window
         )
     }
 
@@ -7307,12 +7184,10 @@ impl Connection {
 
             frame::Frame::CryptoHeader { .. } => unreachable!(),
 
-            frame::Frame::NewToken { token } => {
+            frame::Frame::NewToken { .. } => 
                 if self.is_server {
                     return Err(Error::InvalidPacket);
-                }
-                self.received_tokens.push_back(token);
-            },
+                },
 
             frame::Frame::Stream { stream_id, data } => {
                 // Peer can't send on our unidirectional streams.
@@ -8241,8 +8116,6 @@ pub struct TransportParams {
     /// DATAGRAM frame extension parameter, if any.
     pub max_datagram_frame_size: Option<u64>,
     // pub preferred_address: ...,
-    /// Address validation tokens contain BDP data
-    pub bdp_tokens: bool,
 }
 
 impl Default for TransportParams {
@@ -8265,7 +8138,6 @@ impl Default for TransportParams {
             initial_source_connection_id: None,
             retry_source_connection_id: None,
             max_datagram_frame_size: None,
-            bdp_tokens: false,
         }
     }
 }
@@ -8416,15 +8288,6 @@ impl TransportParams {
                     tp.max_datagram_frame_size = Some(val.get_varint()?);
                 },
 
-                0x1312 => {
-                    let bdp_tokens = val.get_varint()?;
-
-                    if bdp_tokens > 1 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.bdp_tokens = bdp_tokens != 0;
-                }
 
                 // Ignore unknown parameters.
                 _ => (),
@@ -8588,14 +8451,7 @@ impl TransportParams {
             b.put_varint(max_datagram_frame_size)?;
         }
 
-        if tp.bdp_tokens {
-            TransportParams::encode_param(
-                &mut b,
-                0x1312,
-                octets::varint_len(1),
-            )?;
-            b.put_varint(1)?;
-        }
+        
 
         let out_len = b.off();
 
@@ -8649,8 +8505,6 @@ impl TransportParams {
                 initial_max_streams_uni: Some(self.initial_max_streams_uni),
 
                 preferred_address: None,
-
-                bdp_tokens: Some(self.bdp_tokens),
             },
         )
     }
@@ -9193,13 +9047,12 @@ mod tests {
             initial_source_connection_id: Some(b"woot woot".to_vec().into()),
             retry_source_connection_id: Some(b"retry".to_vec().into()),
             max_datagram_frame_size: Some(32),
-            bdp_tokens: true,
         };
 
         let mut raw_params = [42; 256];
         let raw_params =
             TransportParams::encode(&tp, true, &mut raw_params).unwrap();
-        assert_eq!(raw_params.len(), 98);
+        assert_eq!(raw_params.len(), 94);
 
         let new_tp = TransportParams::decode(raw_params, false).unwrap();
 
@@ -9224,13 +9077,12 @@ mod tests {
             initial_source_connection_id: Some(b"woot woot".to_vec().into()),
             retry_source_connection_id: None,
             max_datagram_frame_size: Some(32),
-            bdp_tokens: true,
         };
 
         let mut raw_params = [42; 256];
         let raw_params =
             TransportParams::encode(&tp, false, &mut raw_params).unwrap();
-        assert_eq!(raw_params.len(), 73);
+        assert_eq!(raw_params.len(), 69);
 
         let new_tp = TransportParams::decode(raw_params, true).unwrap();
 
@@ -15419,30 +15271,17 @@ mod tests {
     #[test]
     /// Tests that resetting a stream restores flow control for unsent data.
     fn last_tx_data_larger_than_tx_data() {
-        let mut client_config = Config::new(PROTOCOL_VERSION).unwrap();
-        client_config
+        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+        config
             .set_application_protos(&[b"proto1", b"proto2"])
             .unwrap();
-        client_config.set_initial_congestion_window_packets(40);
-        client_config.set_initial_max_data(12000);
-        client_config.set_initial_max_stream_data_bidi_local(20000);
-        client_config.set_initial_max_stream_data_bidi_remote(20000);
-        client_config.set_max_recv_udp_payload_size(1200);
-        client_config.verify_peer(false);
+        config.set_initial_max_data(12000);
+        config.set_initial_max_stream_data_bidi_local(20000);
+        config.set_initial_max_stream_data_bidi_remote(20000);
+        config.set_max_recv_udp_payload_size(1200);
+        config.verify_peer(false);
 
-        let mut server_config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        server_config.load_cert_chain_from_pem_file("examples/cert.crt").unwrap();
-        server_config.load_priv_key_from_pem_file("examples/cert.key").unwrap();
-        server_config.set_application_protos(&[b"proto1", b"proto2"]).unwrap();
-        server_config.set_initial_congestion_window_packets(20);
-        server_config.set_initial_max_data(30);
-        server_config.set_initial_max_stream_data_bidi_local(15);
-        server_config.set_initial_max_stream_data_bidi_remote(15);
-        server_config.set_initial_max_streams_bidi(3);
-        server_config.set_initial_max_streams_uni(3);
-        server_config.set_ack_delay_exponent(8);
-
-        let mut pipe = testing::Pipe::with_client_and_server_config(&mut client_config, &mut server_config).unwrap();
+        let mut pipe = testing::Pipe::with_client_config(&mut config).unwrap();
         assert_eq!(pipe.handshake(), Ok(()));
 
         // Client opens stream 4 and 8.
